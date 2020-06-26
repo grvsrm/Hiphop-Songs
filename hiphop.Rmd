@@ -1,0 +1,188 @@
+---
+title: "Modelling hip hop songs dataset using PCA "
+author: "Gaurav Sharma"
+date: "24/06/2020"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      cache = TRUE)
+library(tidyverse)
+library(tidymodels)
+```
+
+# Lets load the data
+```{r}
+rankings <- read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-04-14/rankings.csv")
+
+```
+
+# Explore the data
+```{r}
+rankings %>% 
+    ggplot(aes(year, points, color = gender)) +
+    geom_jitter(alpha = 0.7) +
+    scale_y_log10()
+
+```
+
+```{r}
+rankings %>% 
+    count(gender, wt = points, sort = T)
+```
+
+# Setting up spotify developer account to access API.
+```{r}
+#library(spotifyr)
+#Sys.setenv(SPOTIFY_CLIENT_ID = 'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX')
+#Sys.setenv(SPOTIFY_CLIENT_SECRET = 'XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX')
+access_token <- spotifyr::get_spotify_access_token()
+```
+
+# Fetching hiphop songs playlist with features
+```{r}
+playlist_features <-spotifyr::get_playlist_audio_features("tmock1923", "7esD007S7kzeSwVtcH9GFe")
+
+glimpse(playlist_features)
+glimpse(rankings)
+```
+
+```{r}
+rankings <- rankings %>% 
+  mutate(search_term = paste(title, artist)) %>% 
+  mutate(search_term = str_to_lower(search_term)) %>% 
+  mutate(search_term = str_remove(search_term, "ft.*$"))
+
+spotify_search <- function(query){
+  spotifyr::search_spotify(query, type = 'track') %>% 
+  filter(popularity == max(popularity)) %>% 
+  pull(id)
+}
+
+spotify_search('Dear Mama')
+
+ranking_ids <- rankings %>% 
+  mutate(id = map(search_term, possibly(spotify_search, NA_character_))) %>% 
+  unnest(id) 
+
+ranking_ids %>% 
+  na.omit() %>% 
+  count(is.na(id), wt = n)
+
+percent(mean(is.na(ranking_ids$id)))
+```
+
+```{r}
+ranking_features <- ranking_ids %>% 
+  mutate(id_group = row_number() %/% 80) %>% 
+  select(id, id_group) %>% 
+  nest(data = c('id')) %>% 
+  mutate(audio_features = map(data, ~spotifyr::get_track_audio_features(.$id))) %>% 
+  unnest(data, audio_features)
+```
+
+```{r}
+ranking_df <- ranking_ids %>%
+  left_join(ranking_features) %>% 
+  select(title, artist, points, year,
+         danceability:tempo) %>% 
+  na.omit()
+
+library(corrr)
+
+ranking_df %>%
+  select(year:tempo) %>% 
+  correlate() %>% 
+  rearrange() %>% 
+  shave %>% 
+  rplot()
+  
+```
+
+# Lets use tidymodels
+```{r}
+
+ranking_rec <- recipe(points ~ ., data = ranking_df) %>%
+  update_role(title, artist, new_role = "id") %>%
+  step_log(points) %>%
+  step_normalize(all_predictors()) %>%
+  step_pca(all_predictors())
+
+ranking_prep <- prep(ranking_rec)
+
+```
+
+```{r}
+tidied_pca <- tidy(ranking_prep,3)
+
+tidied_pca %>% 
+  mutate(component = fct_inorder(component)) %>% 
+  ggplot(aes(value, terms, fill = terms)) +
+  geom_col(show.legend = F) +
+  facet_wrap(~component) +
+  labs(y = NULL)
+
+library(tidytext)
+tidied_pca %>% 
+  filter(component %in% c("PC1", "PC2", "PC3", "PC4", "PC5", "PC6")) %>%
+  group_by(component) %>% 
+  top_n(6, abs(value)) %>% 
+  ungroup() %>% 
+  mutate(terms = reorder_within(terms, abs(value), component)) %>% 
+  ggplot(aes(value, terms, fill = value>0), alpha = 0.2) +
+  geom_col() +
+  facet_wrap(~component, scales = "free_y") +
+  scale_y_reordered() +
+  labs(x = "Absolute Value of Contribution",
+       y = NULL,
+       fill = "Positive?")
+
+```
+
+
+```{r}
+
+juice(ranking_prep) %>% 
+  ggplot(aes(PC1, PC2)) +
+  geom_point(alpha = 0.) +
+  geom_text(aes(label = title), check_overlap = T)
+
+```
+
+```{r}
+sdev <- ranking_prep$steps[[3]]$res$sdev
+
+percent_variation <- sdev^2 / sum(sdev^2)
+
+tibble(component = unique(tidied_pca$component),
+       percent_var = percent_variation) %>% 
+  mutate(component = fct_reorder(component, -percent_var)) %>% 
+  ggplot(aes(component, percent_var)) +
+  geom_col()
+```
+
+# Lets do a linear regression now on PCA
+```{r}
+pca_lm <- juice(ranking_prep) %>% 
+  select(-artist, -title) %>% 
+  lm(points ~ ., data = .)
+
+summary(pca_lm)
+```
+
+# That's a small exercise to see how we can leverage the functionalities of PCA in our model
+
+
+
+
+
+
+
+
+
+
+
+
